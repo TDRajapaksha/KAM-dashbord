@@ -905,11 +905,35 @@ export default function FillFormPage() {
       if (!me) throw new Error("You're not logged in.");
 
       // Extract geo coordinates from any Point answers
+           // Extract geo coordinates from any Point answers
       let geoLat: number | null = null;
       let geoLng: number | null = null;
+      const finalAnswers = { ...answers }; // Create a copy to modify
+
       for (const q of questions) {
         if (q.type === "Point") {
-          const v = answers[q.id]?.toString() ?? "";
+          let v = finalAnswers[q.id]?.toString() ?? "";
+          
+          // ðŸš€ FIX: If they pasted a short link, expand it right now!
+          if (v.includes("maps.app.goo.gl")) {
+            try {
+              const res = await fetch(`/api/resolve-link?url=${encodeURIComponent(v)}`);
+              const data = await res.json();
+              if (data.resolvedUrl) {
+                // Extract the exact lat/lng and save a clean URL to the database
+                const match = data.resolvedUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/) || 
+                              data.resolvedUrl.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+                if (match) {
+                  v = `https://www.google.com/maps/search/?api=1&query=${match[1]},${match[2]}`;
+                  finalAnswers[q.id] = v; // Save the expanded URL, not the short link
+                }
+              }
+            } catch (e) {
+              console.error("Could not expand link", e);
+            }
+          }
+
+          // Now parse the coordinates
           const coordinates = parsePointCoordinates(v);
           if (coordinates) {
             geoLat = coordinates.lat;
@@ -917,14 +941,14 @@ export default function FillFormPage() {
           }
         }
       }
-
-      const { error: insertErr } = await supabase.from("responses").insert({
+            const { error: insertErr } = await supabase.from("responses").insert({
         project_id: id,
         submitted_by: me.id,
-        answers,
+        answers: finalAnswers, // ðŸš€ Use the fixed answers here!
         geo_lat: geoLat,
         geo_lng: geoLng,
         media: Object.fromEntries(
+          // ... keep the rest the same
           questions
             .filter(
               (question) =>
@@ -1398,7 +1422,7 @@ function QuestionInput({
     );
   }
 
-  if (type === "Point") {
+    if (type === "Point") {
     const pointValue = typeof value === "string" ? value : "";
 
     function useCurrentLocation() {
@@ -1409,10 +1433,12 @@ function QuestionInput({
 
       setLocating(true);
       setPointError(null);
+      
       navigator.geolocation.getCurrentPosition(
         ({ coords }) => {
+          // ðŸš€ FIXED: Save it in the exact Google Maps format that the Summary Map parser reads
           onChange(
-            `https://maps.google.com/?q=${coords.latitude},${coords.longitude}`
+            `https://www.google.com/maps/search/?api=1&query=${coords.latitude},${coords.longitude}`
           );
           setLocating(false);
         },
@@ -1483,6 +1509,7 @@ function QuestionInput({
 import { useEffect, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import {
   getProject,
   getQuestions,
@@ -1516,8 +1543,18 @@ import {
   Cell,
 } from "recharts";
 
+const SummaryMap = dynamic(() => import("@/components/projects/SummaryMap"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-72 w-full items-center justify-center rounded-lg bg-gray-50 text-sm text-gray-500">
+      Loading map...
+    </div>
+  ),
+});
+
 type Tab = "summary" | "form" | "data" | "settings";
 type DataSubTab = "table" | "gallery" | "downloads";
+type MediaFilter = "all" | "Photo" | "Video" | "Audio" | "File";
 
 const PIE_COLORS = [
   "#1E88E5",
@@ -1529,6 +1566,80 @@ const PIE_COLORS = [
   "#8D6E63",
 ];
 
+function validCoordinates(lat: unknown, lng: unknown) {
+  if (
+    (typeof lat !== "number" && typeof lat !== "string") ||
+    (typeof lng !== "number" && typeof lng !== "string") ||
+    (typeof lat === "string" && !lat.trim()) ||
+    (typeof lng === "string" && !lng.trim())
+  ) {
+    return null;
+  }
+
+  const parsedLat = Number(lat);
+  const parsedLng = Number(lng);
+
+  if (
+    !Number.isFinite(parsedLat) ||
+    !Number.isFinite(parsedLng) ||
+    parsedLat < -90 ||
+    parsedLat > 90 ||
+    parsedLng < -180 ||
+    parsedLng > 180
+  ) {
+    return null;
+  }
+
+  return { lat: parsedLat, lng: parsedLng };
+}
+
+function parsePointCoordinates(value: unknown): { lat: number; lng: number } | null {
+  if (typeof value === "object" && value !== null) {
+    if (Array.isArray(value)) {
+      return validCoordinates(value[0], value[1]);
+    }
+
+    const location = value as Record<string, unknown>;
+    const directCoordinates = validCoordinates(
+      location.lat ?? location.latitude,
+      location.lng ?? location.lon ?? location.longitude
+    );
+    if (directCoordinates) return directCoordinates;
+
+    for (const key of ["coords", "coordinates", "location", "value", "text", "url"]) {
+      const nestedCoordinates = parsePointCoordinates(location[key]);
+      if (nestedCoordinates) return nestedCoordinates;
+    }
+
+    return null;
+  }
+
+  if (typeof value !== "string" || !value.trim()) return null;
+
+  let answer = value;
+  try {
+    answer = decodeURIComponent(answer);
+  } catch {
+    // Keep the original value when a pasted URL contains malformed escapes.
+  }
+
+  const coordinatePatterns = [
+    /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/,
+    /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/i,
+    /(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/,
+  ];
+
+  for (const pattern of coordinatePatterns) {
+    const match = answer.match(pattern);
+    if (!match) continue;
+
+    const coordinates = validCoordinates(match[1], match[2]);
+    if (coordinates) return coordinates;
+  }
+
+  return null;
+}
+
 export default function ProjectDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -1536,6 +1647,8 @@ export default function ProjectDetailPage() {
   const id = params.id as string;
 
   const [tab, setTab] = useState<Tab>("summary");
+  const [galleryFilter, setGalleryFilter] = useState<MediaFilter>("all");
+  const [openGallery, setOpenGallery] = useState(false); 
   const [project, setProject] = useState<Project | null>(null);
   const [permission, setPermission] = useState<
     "owner" | "edit" | "fill" | null
@@ -1581,6 +1694,12 @@ export default function ProjectDetailPage() {
   useEffect(() => {
     if (searchParams.get("tab") === "settings") setTab("settings");
   }, [searchParams]);
+
+  const handleNavigateToGallery = (filter: MediaFilter) => {
+    setGalleryFilter(filter);
+    setOpenGallery(true);
+    setTab("data");
+  };
 
   if (loading)
     return (
@@ -1649,25 +1768,25 @@ export default function ProjectDetailPage() {
               </Link>
             )}
             {canFill && project.status === "deployed" && (
-  <Link
-    href={`/projects/${id}/fill`}
-    className="rounded-md bg-[#004C99] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#003d7a]"
-  >
-    Fill form
-  </Link>
-)}
-{canFill && project.status !== "deployed" && (
-  <span
-    title={
-      project.status === "archived"
-        ? "Archived projects don't accept responses"
-        : "Deploy the project to accept responses"
-    }
-    className="cursor-not-allowed rounded-md bg-white/5 px-3 py-1.5 text-xs font-semibold text-gray-400"
-  >
-    {project.status === "archived" ? "Archived" : "Not deployed"}
-  </span>
-)}
+              <Link
+                href={`/projects/${id}/fill`}
+                className="rounded-md bg-[#004C99] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#003d7a]"
+              >
+                Fill form
+              </Link>
+            )}
+            {canFill && project.status !== "deployed" && (
+              <span
+                title={
+                  project.status === "archived"
+                    ? "Archived projects don't accept responses"
+                    : "Deploy the project to accept responses"
+                }
+                className="cursor-not-allowed rounded-md bg-white/5 px-3 py-1.5 text-xs font-semibold text-gray-400"
+              >
+                {project.status === "archived" ? "Archived" : "Not deployed"}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -1679,7 +1798,7 @@ export default function ProjectDetailPage() {
             ["summary", "SUMMARY"],
             ["form", "FORM"],
             ...(permission === "owner"
-              ? ([ ["data", "DATA"], ["settings", "SETTINGS"] ] as [Tab, string][])
+              ? ([["data", "DATA"], ["settings", "SETTINGS"]] as [Tab, string][])
               : []),
           ] as [Tab, string][]
         ).map(([key, label]) => (
@@ -1708,6 +1827,7 @@ export default function ProjectDetailPage() {
             summary={summary}
             responses={responses}
             questionCount={questions.length}
+            onNavigateToGallery={handleNavigateToGallery}
           />
         )}
 
@@ -1742,6 +1862,8 @@ export default function ProjectDetailPage() {
             responses={responses}
             canEdit={canEdit}
             onChanged={loadAll}
+            initialFilter={galleryFilter}
+            openGallery={openGallery}
           />
         )}
 
@@ -1758,7 +1880,7 @@ export default function ProjectDetailPage() {
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// READ-ONLY FORM VIEW (for fill-only users)
+// READ-ONLY FORM VIEW
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function ReadOnlyFormView({ questions }: { questions: Question[] }) {
   if (questions.length === 0) {
@@ -1812,11 +1934,13 @@ function SummaryTab({
   summary,
   responses,
   questionCount,
+  onNavigateToGallery,
 }: {
   project: Project;
   summary: SummaryItem[];
   responses: ResponseRow[];
   questionCount: number;
+  onNavigateToGallery: (filter: MediaFilter) => void;
 }) {
   const totalResponses = responses.length;
 
@@ -1850,7 +1974,12 @@ function SummaryTab({
       ) : (
         <div className="space-y-4">
           {summary.map((item) => (
-            <SummaryCard key={item.questionId} item={item} />
+            <SummaryCard
+              key={item.questionId}
+              item={item}
+              responses={responses}
+              onNavigateToGallery={onNavigateToGallery}
+            />
           ))}
         </div>
       )}
@@ -1889,7 +2018,88 @@ function StatCard({
   );
 }
 
-function SummaryCard({ item }: { item: SummaryItem }) {
+function SummaryCard({
+  item,
+  responses,
+  onNavigateToGallery,
+}: {
+  item: SummaryItem;
+  responses: ResponseRow[];
+  onNavigateToGallery: (filter: MediaFilter) => void;
+}) {
+  const [mapPoints, setMapPoints] = useState<
+    { lat: number; lng: number; label: string }[]
+  >([]);
+  const [isParsing, setIsParsing] = useState(false);
+
+  useEffect(() => {
+    if (item.type !== "Point") return;
+
+    let isMounted = true;
+    setIsParsing(true);
+
+    const parseLocations = async () => {
+      const points: { lat: number; lng: number; label: string }[] = [];
+
+      for (const r of responses) {
+        const rawAnswer = r.answers?.[item.questionId];
+        let coordinates =
+          parsePointCoordinates(rawAnswer) ??
+          validCoordinates(r.geo_lat, r.geo_lng);
+
+        // 3. Check for Short Links (Flutter/EXE format)
+        const answerText =
+          typeof rawAnswer === "string"
+            ? rawAnswer
+            : typeof rawAnswer === "object" && rawAnswer !== null
+              ? String(
+                  rawAnswer.value ??
+                    rawAnswer.text ??
+                    rawAnswer.url ??
+                    ""
+                )
+              : "";
+        if (
+          !coordinates &&
+          (answerText.includes("goo.gl") || answerText.includes("maps.app"))
+        ) {
+          try {
+            const res = await fetch(
+              `/api/resolve-link?url=${encodeURIComponent(answerText)}`
+            );
+            const data = await res.json();
+            if (data.resolvedUrl) {
+              coordinates = parsePointCoordinates(data.resolvedUrl);
+            }
+          } catch (err) {
+            console.error("Failed to resolve short link:", err);
+          }
+        }
+
+        if (coordinates) {
+          points.push({
+            lat: coordinates.lat,
+            lng: coordinates.lng,
+            label: `Submitted by ${r.submitter_name || "Unknown"}`,
+          });
+        }
+      }
+
+      if (isMounted) {
+        setMapPoints(points);
+        setIsParsing(false);
+      }
+    };
+
+    parseLocations();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [item, responses]);
+
+  const isMediaType = ["Photo", "Video", "Audio", "File"].includes(item.type);
+
   return (
     <div className="rounded-xl bg-white p-5 shadow-sm">
       <div className="mb-4 flex items-start justify-between gap-4">
@@ -1909,14 +2119,11 @@ function SummaryCard({ item }: { item: SummaryItem }) {
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           <div className="space-y-3">
             {item.options.map((opt) => {
-              const pct =
-                item.total > 0 ? (opt.count / item.total) * 100 : 0;
+              const pct = item.total > 0 ? (opt.count / item.total) * 100 : 0;
               return (
                 <div key={opt.value}>
                   <div className="mb-1 flex justify-between text-xs">
-                    <span className="truncate text-gray-700">
-                      {opt.value}
-                    </span>
+                    <span className="truncate text-gray-700">{opt.value}</span>
                     <span className="text-gray-500">
                       {opt.count} ({pct.toFixed(0)}%)
                     </span>
@@ -1944,10 +2151,7 @@ function SummaryCard({ item }: { item: SummaryItem }) {
                   label={(entry: any) => entry.value}
                 >
                   {item.options.map((_, i) => (
-                    <Cell
-                      key={i}
-                      fill={PIE_COLORS[i % PIE_COLORS.length]}
-                    />
+                    <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
                   ))}
                 </Pie>
                 <Tooltip />
@@ -1960,6 +2164,51 @@ function SummaryCard({ item }: { item: SummaryItem }) {
       {item.average !== undefined && (
         <div className="rounded-lg bg-blue-50 px-3 py-3 text-sm text-[#004C99]">
           Average: <strong>{item.average.toFixed(2)}</strong>
+        </div>
+      )}
+
+      {/* ðŸš€ Render the Map for Point questions */}
+      {item.type === "Point" && (
+        <div className="mt-2">
+          {isParsing ? (
+            <div className="flex h-72 w-full items-center justify-center rounded-lg bg-gray-50 text-sm text-gray-500 border border-gray-200">
+              Resolving shared locations...
+            </div>
+          ) : mapPoints.length > 0 ? (
+            <SummaryMap points={mapPoints} />
+          ) : (
+            <div className="rounded-lg bg-gray-50 px-3 py-3 text-xs text-gray-500">
+              No valid coordinates found in the responses.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ðŸš€ Render the "View in Gallery" button for media types */}
+      {isMediaType && (
+        <div className="rounded-lg bg-gray-50 px-4 py-6 text-center border border-gray-200 border-dashed">
+          <div className="text-sm text-gray-600 mb-3">
+            {item.total} {item.type.toLowerCase()}
+            {item.total === 1 ? "" : "s"} uploaded
+          </div>
+          <button
+            onClick={() => onNavigateToGallery(item.type as MediaFilter)}
+            className="inline-flex items-center gap-2 rounded-lg bg-[#004C99] px-4 py-2 text-sm font-medium text-white hover:bg-[#003d7a] transition-colors"
+          >
+            View {item.type}s in Gallery
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M5 12h14M12 5l7 7-7 7" />
+            </svg>
+          </button>
         </div>
       )}
 
@@ -1979,11 +2228,15 @@ function SummaryCard({ item }: { item: SummaryItem }) {
         </div>
       )}
 
-      {!item.options && !item.samples && item.average === undefined && (
-        <div className="rounded-lg bg-gray-50 px-3 py-3 text-xs text-gray-500">
-          No chart available for this question type.
-        </div>
-      )}
+      {!item.options &&
+        !item.samples &&
+        item.average === undefined &&
+        item.type !== "Point" &&
+        !isMediaType && (
+          <div className="rounded-lg bg-gray-50 px-3 py-3 text-xs text-gray-500">
+            No chart available for this question type.
+          </div>
+        )}
     </div>
   );
 }
@@ -2026,33 +2279,34 @@ function DataTab({
   responses,
   canEdit,
   onChanged,
+  initialFilter,
+  openGallery,
 }: {
   project: Project;
   questions: Question[];
   responses: ResponseRow[];
   canEdit: boolean;
   onChanged: () => void;
+  initialFilter: MediaFilter;
+  openGallery: boolean;
 }) {
-  const [subTab, setSubTab] = useState<DataSubTab>("table");
+  const [subTab, setSubTab] = useState<DataSubTab>(
+    openGallery ? "gallery" : "table"
+  );
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [exportingFormat, setExportingFormat] =
     useState<ProjectExportFormat | null>(null);
 
-  // â”€â”€ Filter state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [search, setSearch] = useState("");
   const [submitterFilter, setSubmitterFilter] = useState<string>("all");
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
 
-  // â”€â”€ Apply filters to responses â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const filteredResponses = responses.filter((r) => {
-    // 1. Submitter
     if (submitterFilter !== "all") {
       const name = r.submitter_name ?? "Unknown";
       if (name !== submitterFilter) return false;
     }
-
-    // 2. Date range
     if (dateFrom) {
       const from = new Date(dateFrom + "T00:00:00").getTime();
       if (new Date(r.submitted_at).getTime() < from) return false;
@@ -2061,8 +2315,6 @@ function DataTab({
       const to = new Date(dateTo + "T23:59:59").getTime();
       if (new Date(r.submitted_at).getTime() > to) return false;
     }
-
-    // 3. Free-text search
     if (search.trim()) {
       const needle = search.toLowerCase();
       const haystack = [
@@ -2076,7 +2328,6 @@ function DataTab({
         .toLowerCase();
       if (!haystack.includes(needle)) return false;
     }
-
     return true;
   });
 
@@ -2093,7 +2344,6 @@ function DataTab({
     setDateTo("");
   }
 
-  // Unique submitters for the dropdown
   const allSubmitters = Array.from(
     new Set(responses.map((r) => r.submitter_name ?? "Unknown"))
   ).sort();
@@ -2169,10 +2419,8 @@ function DataTab({
           </div>
         ) : subTab === "table" ? (
           <>
-            {/* â”€â”€ Search + Filter bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
             <div className="border-b border-gray-200 bg-white px-6 py-4">
               <div className="flex flex-wrap items-end gap-3">
-                {/* Search */}
                 <div className="min-w-[220px] flex-1">
                   <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-gray-500">
                     Search
@@ -2200,7 +2448,6 @@ function DataTab({
                   </div>
                 </div>
 
-                {/* Submitter dropdown */}
                 <div className="min-w-[160px]">
                   <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-gray-500">
                     Submitted by
@@ -2219,7 +2466,6 @@ function DataTab({
                   </select>
                 </div>
 
-                {/* Date from */}
                 <div className="min-w-[150px]">
                   <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-gray-500">
                     From
@@ -2232,7 +2478,6 @@ function DataTab({
                   />
                 </div>
 
-                {/* Date to */}
                 <div className="min-w-[150px]">
                   <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-gray-500">
                     To
@@ -2245,7 +2490,6 @@ function DataTab({
                   />
                 </div>
 
-                {/* Clear */}
                 {hasActiveFilters && (
                   <button
                     onClick={clearFilters}
@@ -2256,7 +2500,6 @@ function DataTab({
                 )}
               </div>
 
-              {/* Result count */}
               <div className="mt-3 text-xs text-gray-500">
                 Showing <strong>{filteredResponses.length}</strong> of{" "}
                 <strong>{responses.length}</strong> response
@@ -2267,7 +2510,6 @@ function DataTab({
               </div>
             </div>
 
-            {/* â”€â”€ Attempts-per-user summary bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
             <div className="border-b border-gray-100 bg-gray-50 px-6 py-3 text-xs text-gray-600">
               <strong>Attempts:</strong>{" "}
               {Array.from(attemptsByUser.entries())
@@ -2278,7 +2520,6 @@ function DataTab({
               </span>
             </div>
 
-            {/* â”€â”€ Table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
             {filteredResponses.length === 0 ? (
               <div className="p-12 text-center text-sm text-gray-500">
                 No responses match your filters.{" "}
@@ -2376,6 +2617,7 @@ function DataTab({
             questions={questions}
             responses={responses}
             projectName={project.name}
+            initialFilter={initialFilter}
           />
         ) : (
           <div className="mx-auto max-w-3xl p-6">
@@ -2464,7 +2706,6 @@ function DataTab({
   );
 }
 
-// Helper â€” render an answer cell, converting URLs to friendly chips
 function renderAnswerCell(v: any): React.ReactNode {
   if (v === undefined || v === null || v === "") return "â€”";
   if (Array.isArray(v)) return v.join(", ");
@@ -2544,14 +2785,18 @@ function GalleryTab({
   questions,
   responses,
   projectName,
+  initialFilter,
 }: {
   questions: Question[];
   responses: ResponseRow[];
   projectName: string;
+  initialFilter: MediaFilter;
 }) {
-  const [filter, setFilter] = useState<
-    "all" | "Photo" | "Video" | "Audio" | "File"
-  >("all");
+  const [filter, setFilter] = useState<MediaFilter>(initialFilter);
+
+  useEffect(() => {
+    if (initialFilter) setFilter(initialFilter);
+  }, [initialFilter]);
 
   const items: MediaItem[] = [];
   for (const r of responses) {
@@ -2599,7 +2844,6 @@ function GalleryTab({
 
   return (
     <div className="p-6">
-      {/* Filter chips */}
       <div className="mb-5 flex flex-wrap gap-2">
         {(
           [
@@ -2608,7 +2852,7 @@ function GalleryTab({
             ["Video", "Videos"],
             ["Audio", "Audio"],
             ["File", "Files"],
-          ] as [typeof filter, string][]
+          ] as [MediaFilter, string][]
         ).map(([key, label]) => {
           const count = counts[key as keyof typeof counts] ?? 0;
           if (key !== "all" && count === 0) return null;
@@ -2629,7 +2873,6 @@ function GalleryTab({
         })}
       </div>
 
-      {/* Grid */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {filtered.map((item) => (
           <MediaCard
@@ -2762,6 +3005,9 @@ function MediaCard({ item }: { item: MediaItem }) {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SETTINGS TAB
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SETTINGS TAB
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function SettingsTab({
   project,
   onSaved,
@@ -2878,7 +3124,9 @@ function SettingsTab({
           </div>
         </div>
       </div>
-      <GoogleSheetsSync projectId={project.id} />
+
+      {/* ðŸš€ GOOGLE SHEETS REMOVED HERE */}
+
       <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
         <h3 className="text-sm font-semibold">Danger zone</h3>
         <div className="mt-4 flex items-center justify-between border-t border-gray-100 pt-3">
@@ -4798,6 +5046,49 @@ export async function POST(
       },
       { status: 500 }
     );
+  }
+}
+import { NextResponse } from "next/server";
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const url = searchParams.get("url");
+
+  if (!url) {
+    return NextResponse.json({ error: "URL is required" }, { status: 400 });
+  }
+
+  try {
+    // Fetch the HTML page of the short link
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+      redirect: "follow",
+    });
+
+    const html = await response.text();
+
+    // ðŸš€ THE MAGIC: Google Maps saves the exact coordinates in the page's meta tags
+    // Example: <meta content="https://www.google.com/maps/place/.../@6.9271,79.8612,15z" property="og:image">
+    // We look for the @lat,lng OR the !3dlat!4dlng inside the HTML
+    const match =
+      html.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/) ||
+      html.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+
+    if (match) {
+      // Return a clean, standard Google Maps URL containing the coordinates
+      return NextResponse.json({
+        resolvedUrl: `https://www.google.com/maps/search/?api=1&query=${match[1]},${match[2]}`,
+      });
+    }
+
+    // If we couldn't find it, return the original url so the frontend doesn't crash
+    return NextResponse.json({ resolvedUrl: url });
+  } catch (error) {
+    console.error("Resolve error:", error);
+    return NextResponse.json({ error: "Failed to resolve URL" }, { status: 500 });
   }
 }
 import {
@@ -7079,6 +7370,157 @@ export default function ProjectsTable() {
         </tbody>
       </table>
     </div>
+  );
+}
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
+import L from "leaflet";
+import * as htmlToImage from "html-to-image";
+
+// Fix missing marker icons in Leaflet + Next.js
+delete (L.Icon.Default.prototype as any)._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png",
+  iconUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png",
+  shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png",
+});
+
+type MapPoint = {
+  lat: number;
+  lng: number;
+  label: string;
+};
+
+function MapBounds({ points }: { points: MapPoint[] }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (points.length > 0) {
+      const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lng]));
+      map.fitBounds(bounds, { padding: [50, 50] });
+    }
+  }, [points, map]);
+
+  return null;
+}
+
+export default function SummaryMap({ points }: { points: MapPoint[] }) {
+  const [isFullScreen, setIsFullScreen] = useState(false);
+  const mapRef = useRef<HTMLDivElement>(null);
+
+  const defaultCenter: [number, number] = [6.9271, 79.8612];
+
+  const displayPoints = points.map((p) => {
+    const jitter = 0.0001;
+    return {
+      ...p,
+      lat: p.lat + (Math.random() - 0.5) * jitter,
+      lng: p.lng + (Math.random() - 0.5) * jitter,
+    };
+  });
+
+  const downloadMap = async () => {
+    if (!mapRef.current) return;
+    try {
+      const dataUrl = await htmlToImage.toPng(mapRef.current, {
+        quality: 1.0,
+        backgroundColor: "#fff",
+      });
+      const link = document.createElement("a");
+      link.download = `map-${Date.now()}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      console.error("Failed to download map", err);
+      alert("Could not download the map image.");
+    }
+  };
+
+  return (
+    <>
+      <div
+        className={`${
+          isFullScreen
+            ? "fixed inset-0 z-[9999] bg-white p-4 h-screen w-screen"
+            : "relative h-72 w-full rounded-lg border border-gray-200 z-0 overflow-hidden"
+        }`}
+      >
+        <div ref={mapRef} className="h-full w-full relative z-0">
+          <MapContainer
+            center={points.length > 0 ? [points[0].lat, points[0].lng] : defaultCenter}
+            zoom={12}
+            style={{ height: "100%", width: "100%", zIndex: 0 }}
+          >
+            <MapBounds points={points} />
+            <TileLayer
+              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
+            {displayPoints.map((point, idx) => (
+              <Marker key={idx} position={[point.lat, point.lng]}>
+                <Popup>
+                  <strong>{point.label}</strong>
+                  <br />
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${point.lat},${point.lng}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-blue-600 hover:underline"
+                  >
+                    Open in Google Maps
+                  </a>
+                </Popup>
+              </Marker>
+            ))}
+          </MapContainer>
+        </div>
+
+        {/* UI Overlay */}
+        <div className="absolute top-3 right-3 z-[400] flex gap-2">
+          <div className="bg-white px-3 py-1.5 rounded-md shadow-md border border-gray-200 text-xs font-bold text-gray-700 flex items-center">
+            {points.length} {points.length === 1 ? "Location" : "Locations"}
+          </div>
+
+          {/* Download Button */}
+          <button
+            onClick={downloadMap}
+            className="bg-white p-1.5 rounded-md shadow-md border border-gray-200 text-gray-700 hover:bg-gray-50 transition"
+            title="Download Map"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+          </button>
+
+          {/* Fullscreen Button */}
+          <button
+            onClick={() => setIsFullScreen(!isFullScreen)}
+            className="bg-white p-1.5 rounded-md shadow-md border border-gray-200 text-gray-700 hover:bg-gray-50 transition"
+            title={isFullScreen ? "Exit Full Screen" : "Full Screen"}
+          >
+            {isFullScreen ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" />
+              </svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+              </svg>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Background overlay for full screen to prevent clicking background */}
+      {isFullScreen && (
+        <div className="fixed inset-0 bg-black/50 z-[9998]" onClick={() => setIsFullScreen(false)} />
+      )}
+    </>
   );
 }
 "use client";

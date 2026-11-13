@@ -40,7 +40,8 @@ export default function SummaryMap({ points }: { points: MapPoint[] }) {
   const defaultCenter: [number, number] = [6.9271, 79.8612];
 
   const displayPoints = points.map((p) => {
-    const jitter = 0.0001;
+    // 🚀 INCREASED JITTER: This spreads the pins out a bit more visually
+    const jitter = 0.0004; 
     return {
       ...p,
       lat: p.lat + (Math.random() - 0.5) * jitter,

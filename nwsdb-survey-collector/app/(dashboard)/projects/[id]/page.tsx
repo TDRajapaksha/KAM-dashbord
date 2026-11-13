@@ -117,10 +117,12 @@ function parsePointCoordinates(value: unknown): { lat: number; lng: number } | n
     // Keep the original value when a pasted URL contains malformed escapes.
   }
 
+  // 🚀 THE ULTIMATE REGEX: Handles everything
   const coordinatePatterns = [
     /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/,
     /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/i,
-    /(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/,
+    /(?:query=|\/search\/)(-?\d+(?:\.\d+)?)\s*,\s*\+?\s*(-?\d+(?:\.\d+)?)/i,
+    /(-?\d+(?:\.\d+)?)\s*,\s*\+?\s*(-?\d+(?:\.\d+)?)/,
   ];
 
   for (const pattern of coordinatePatterns) {
@@ -526,7 +528,7 @@ function SummaryCard({
   >([]);
   const [isParsing, setIsParsing] = useState(false);
 
-  useEffect(() => {
+      useEffect(() => {
     if (item.type !== "Point") return;
 
     let isMounted = true;
@@ -536,38 +538,42 @@ function SummaryCard({
       const points: { lat: number; lng: number; label: string }[] = [];
 
       for (const r of responses) {
-        const rawAnswer = r.answers?.[item.questionId];
-        let coordinates =
-          parsePointCoordinates(rawAnswer) ??
-          validCoordinates(r.geo_lat, r.geo_lng);
+        let rawAnswer = r.answers?.[item.questionId];
+        if (!rawAnswer) continue;
 
-        // 3. Check for Short Links (Flutter/EXE format)
-        const answerText =
-          typeof rawAnswer === "string"
-            ? rawAnswer
-            : typeof rawAnswer === "object" && rawAnswer !== null
-              ? String(
-                  rawAnswer.value ??
-                    rawAnswer.text ??
-                    rawAnswer.url ??
-                    ""
-                )
-              : "";
-        if (
-          !coordinates &&
-          (answerText.includes("goo.gl") || answerText.includes("maps.app"))
-        ) {
+        if (typeof rawAnswer === "object" && rawAnswer !== null) {
+          rawAnswer = rawAnswer.value || rawAnswer.text || rawAnswer.url || "";
+        }
+
+        let answer = String(rawAnswer);
+        if (!answer || answer === "[object Object]") continue;
+
+        let coordinates = parsePointCoordinates(answer);
+        
+        // If it's a short link, we use a free proxy to read it
+        if (!coordinates && (answer.includes("goo.gl") || answer.includes("maps.app"))) {
           try {
-            const res = await fetch(
-              `/api/resolve-link?url=${encodeURIComponent(answerText)}`
-            );
-            const data = await res.json();
-            if (data.resolvedUrl) {
-              coordinates = parsePointCoordinates(data.resolvedUrl);
+            // 🚀 We use a free proxy that bypasses Google's block
+            const proxyUrl = `https://r.jina.ai/http://${answer.replace('https://', '')}`;
+            const res = await fetch(proxyUrl);
+            const text = await res.text();
+            
+            // Look for coordinates in the returned text
+            const match = text.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/) || 
+                          text.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/) ||
+                          text.match(/center=(-?\d+\.\d+)%2C(-?\d+\.\d+)/i);
+            
+            if (match) {
+              coordinates = { lat: parseFloat(match[1]), lng: parseFloat(match[2]) };
             }
           } catch (err) {
-            console.error("Failed to resolve short link:", err);
+            console.error("Proxy resolve failed:", err);
           }
+        }
+
+        // Final fallback: Use database coordinates
+        if (!coordinates && r.geo_lat && r.geo_lng) {
+           coordinates = validCoordinates(r.geo_lat, r.geo_lng);
         }
 
         if (coordinates) {
@@ -576,6 +582,8 @@ function SummaryCard({
             lng: coordinates.lng,
             label: `Submitted by ${r.submitter_name || "Unknown"}`,
           });
+        } else {
+          console.log("Could not parse coordinates from:", answer);
         }
       }
 
@@ -1499,9 +1507,6 @@ function MediaCard({ item }: { item: MediaItem }) {
 // ═══════════════════════════════════════════════════════════
 // SETTINGS TAB
 // ═══════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════
-// SETTINGS TAB
-// ═══════════════════════════════════════════════════════════
 function SettingsTab({
   project,
   onSaved,
@@ -1618,8 +1623,6 @@ function SettingsTab({
           </div>
         </div>
       </div>
-
-      {/* 🚀 GOOGLE SHEETS REMOVED HERE */}
 
       <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
         <h3 className="text-sm font-semibold">Danger zone</h3>

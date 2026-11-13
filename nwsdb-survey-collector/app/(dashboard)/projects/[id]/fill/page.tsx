@@ -130,43 +130,41 @@ export default function FillFormPage() {
       const me = getUser();
       if (!me) throw new Error("You're not logged in.");
 
-      // Extract geo coordinates from any Point answers
-           // Extract geo coordinates from any Point answers
+            // Extract geo coordinates from any Point answers
       let geoLat: number | null = null;
       let geoLng: number | null = null;
-      const finalAnswers = { ...answers }; // Create a copy to modify
+      const finalAnswers = { ...answers };
 
       for (const q of questions) {
         if (q.type === "Point") {
           let v = finalAnswers[q.id]?.toString() ?? "";
           
-          // 🚀 FIX: If they pasted a short link, expand it right now!
-          if (v.includes("maps.app.goo.gl")) {
+          // 🚀 If it's a short link, ask the API to expand it
+          if (v.includes("maps.app.goo.gl") || v.includes("goo.gl")) {
             try {
               const res = await fetch(`/api/resolve-link?url=${encodeURIComponent(v)}`);
               const data = await res.json();
-              if (data.resolvedUrl) {
-                // Extract the exact lat/lng and save a clean URL to the database
-                const match = data.resolvedUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/) || 
-                              data.resolvedUrl.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
-                if (match) {
-                  v = `https://www.google.com/maps/search/?api=1&query=${match[1]},${match[2]}`;
-                  finalAnswers[q.id] = v; // Save the expanded URL, not the short link
-                }
+              
+              if (data.resolvedUrl && data.resolvedUrl !== v) {
+                v = data.resolvedUrl; // Use the expanded long link
+                finalAnswers[q.id] = v; 
               }
             } catch (e) {
               console.error("Could not expand link", e);
             }
           }
 
-          // Now parse the coordinates
+          // Parse the coordinates from the (now long) link
           const coordinates = parsePointCoordinates(v);
           if (coordinates) {
             geoLat = coordinates.lat;
             geoLng = coordinates.lng;
+            // Ensure the saved answer is a perfect URL with the coordinates
+            finalAnswers[q.id] = `https://www.google.com/maps/search/?api=1&query=${geoLat},${geoLng}`;
           }
         }
       }
+      
             const { error: insertErr } = await supabase.from("responses").insert({
         project_id: id,
         submitted_by: me.id,
@@ -648,8 +646,29 @@ function QuestionInput({
     );
   }
 
-    if (type === "Point") {
+      if (type === "Point") {
     const pointValue = typeof value === "string" ? value : "";
+
+    // 🚀 ADD THIS FUNCTION: Expand the link as soon as it's pasted
+    async function handleLinkChange(e: React.ChangeEvent<HTMLInputElement>) {
+      let val = e.target.value.trim();
+      
+      // If it's a short link, expand it immediately
+      if (val.includes("goo.gl") || val.includes("maps.app")) {
+        try {
+          const res = await fetch(`/api/resolve-link?url=${encodeURIComponent(val)}`);
+          const data = await res.json();
+          if (data.resolvedUrl) {
+            val = data.resolvedUrl; // Replace with the long link
+          }
+        } catch (err) {
+          console.error("Could not expand link", err);
+        }
+      }
+      
+      onChange(val);
+      setPointError(null);
+    }
 
     function useCurrentLocation() {
       if (!navigator.geolocation) {
@@ -662,7 +681,6 @@ function QuestionInput({
       
       navigator.geolocation.getCurrentPosition(
         ({ coords }) => {
-          // 🚀 FIXED: Save it in the exact Google Maps format that the Summary Map parser reads
           onChange(
             `https://www.google.com/maps/search/?api=1&query=${coords.latitude},${coords.longitude}`
           );
@@ -706,10 +724,7 @@ function QuestionInput({
           type="text"
           placeholder="Paste Google Maps share link"
           value={pointValue}
-          onChange={(e) => {
-            onChange(e.target.value);
-            setPointError(null);
-          }}
+          onChange={handleLinkChange} // 🚀 USE THE NEW FUNCTION HERE
           className={inputCls}
         />
         <p className="text-xs text-gray-500">
