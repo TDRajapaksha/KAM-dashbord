@@ -1,0 +1,13 @@
+
+> nwsdb-survey-collector@0.1.0 dev
+> next dev --hostname 127.0.0.1
+
+  ▲ Next.js 14.2.15
+  - Local:        http://127.0.0.1:3000
+  - Network:      http://127.0.0.1:3000
+  - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 5.7s
+   Reload env: .env.local
+   Reload env: .env.local
