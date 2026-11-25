@@ -103,7 +103,16 @@ export async function register({
       return { ok: false, error: error.message };
     }
 
-    const row: any = data;
+    let row: any = data;
+    if (Array.isArray(row)) {
+      row = row[0]?.register_user ?? row[0];
+    } else if (
+      row &&
+      typeof row === "object" &&
+      "register_user" in row
+    ) {
+      row = row.register_user;
+    }
     if (!row?.success) {
       return { ok: false, error: row?.error ?? "Registration failed." };
     }

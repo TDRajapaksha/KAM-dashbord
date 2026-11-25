@@ -87,12 +87,20 @@ function validCoordinates(lat: unknown, lng: unknown) {
   return { lat: parsedLat, lng: parsedLng };
 }
 
+function isGoogleMapsShortLink(value: string) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === "maps.app.goo.gl" || hostname === "goo.gl";
+  } catch {
+    return false;
+  }
+}
+
 function parsePointCoordinates(value: unknown): { lat: number; lng: number } | null {
   if (typeof value === "object" && value !== null) {
     if (Array.isArray(value)) {
       return validCoordinates(value[0], value[1]);
     }
-
     const location = value as Record<string, unknown>;
     const directCoordinates = validCoordinates(
       location.lat ?? location.latitude,
@@ -104,7 +112,6 @@ function parsePointCoordinates(value: unknown): { lat: number; lng: number } | n
       const nestedCoordinates = parsePointCoordinates(location[key]);
       if (nestedCoordinates) return nestedCoordinates;
     }
-
     return null;
   }
 
@@ -113,23 +120,26 @@ function parsePointCoordinates(value: unknown): { lat: number; lng: number } | n
   let answer = value;
   try {
     answer = decodeURIComponent(answer);
-  } catch {
-    // Keep the original value when a pasted URL contains malformed escapes.
-  }
+  } catch {}
 
-  // 🚀 THE ULTIMATE REGEX: Handles everything
   const coordinatePatterns = [
     /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/,
     /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/i,
-    /(?:query=|\/search\/)(-?\d+(?:\.\d+)?)\s*,\s*\+?\s*(-?\d+(?:\.\d+)?)/i,
+    /!2d(-?\d+(?:\.\d+)?)!3d(-?\d+(?:\.\d+)?)/i,
+    /(?:query=|q=|\/search\/)(-?\d+(?:\.\d+)?)\s*(?:%2C|,)\s*\+?\s*(-?\d+(?:\.\d+)?)/i,
+    /(?:center|ll)=(-?\d+(?:\.\d+)?)(?:%2C|,)(-?\d+(?:\.\d+)?)/i,
     /(-?\d+(?:\.\d+)?)\s*,\s*\+?\s*(-?\d+(?:\.\d+)?)/,
   ];
 
   for (const pattern of coordinatePatterns) {
     const match = answer.match(pattern);
     if (!match) continue;
+    
+    const reversed = pattern.source.startsWith("!2d");
+    const lat = reversed ? match[2] : match[1];
+    const lng = reversed ? match[1] : match[2];
 
-    const coordinates = validCoordinates(match[1], match[2]);
+    const coordinates = validCoordinates(lat, lng);
     if (coordinates) return coordinates;
   }
 
@@ -154,6 +164,9 @@ export default function ProjectDetailPage() {
   const [summary, setSummary] = useState<SummaryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  
+  // 🚀 State for highlighting the row
+  const [highlightedResponseId, setHighlightedResponseId] = useState<string | null>(null);
 
   async function loadAll() {
     setLoading(true);
@@ -194,6 +207,12 @@ export default function ProjectDetailPage() {
   const handleNavigateToGallery = (filter: MediaFilter) => {
     setGalleryFilter(filter);
     setOpenGallery(true);
+    setTab("data");
+  };
+
+  // 🚀 Function to handle clicking a map point
+  const handleViewResponse = (responseId: string) => {
+    setHighlightedResponseId(responseId);
     setTab("data");
   };
 
@@ -324,6 +343,7 @@ export default function ProjectDetailPage() {
             responses={responses}
             questionCount={questions.length}
             onNavigateToGallery={handleNavigateToGallery}
+            onViewResponse={handleViewResponse} // 🚀 Passed here
           />
         )}
 
@@ -360,6 +380,7 @@ export default function ProjectDetailPage() {
             onChanged={loadAll}
             initialFilter={galleryFilter}
             openGallery={openGallery}
+            highlightedResponseId={highlightedResponseId} // 🚀 Passed here
           />
         )}
 
@@ -431,12 +452,14 @@ function SummaryTab({
   responses,
   questionCount,
   onNavigateToGallery,
+  onViewResponse,
 }: {
   project: Project;
   summary: SummaryItem[];
   responses: ResponseRow[];
   questionCount: number;
   onNavigateToGallery: (filter: MediaFilter) => void;
+  onViewResponse: (responseId: string) => void;
 }) {
   const totalResponses = responses.length;
 
@@ -475,6 +498,7 @@ function SummaryTab({
               item={item}
               responses={responses}
               onNavigateToGallery={onNavigateToGallery}
+              onViewResponse={onViewResponse}
             />
           ))}
         </div>
@@ -518,62 +542,66 @@ function SummaryCard({
   item,
   responses,
   onNavigateToGallery,
+  onViewResponse,
 }: {
   item: SummaryItem;
   responses: ResponseRow[];
   onNavigateToGallery: (filter: MediaFilter) => void;
+  onViewResponse: (responseId: string) => void;
 }) {
   const [mapPoints, setMapPoints] = useState<
-    { lat: number; lng: number; label: string }[]
+    { lat: number; lng: number; label: string; responseId: string }[]
   >([]);
   const [isParsing, setIsParsing] = useState(false);
 
-      useEffect(() => {
+  useEffect(() => {
     if (item.type !== "Point") return;
 
     let isMounted = true;
     setIsParsing(true);
 
     const parseLocations = async () => {
-      const points: { lat: number; lng: number; label: string }[] = [];
+      const points: { lat: number; lng: number; label: string; responseId: string }[] = [];
 
       for (const r of responses) {
-        let rawAnswer = r.answers?.[item.questionId];
-        if (!rawAnswer) continue;
-
-        if (typeof rawAnswer === "object" && rawAnswer !== null) {
-          rawAnswer = rawAnswer.value || rawAnswer.text || rawAnswer.url || "";
+        const rawAnswer = r.answers?.[item.questionId];
+        if (rawAnswer === undefined || rawAnswer === null || rawAnswer === "") {
+          continue;
         }
 
-        let answer = String(rawAnswer);
-        if (!answer || answer === "[object Object]") continue;
+        let coordinates = parsePointCoordinates(rawAnswer);
+        let answer =
+          typeof rawAnswer === "string"
+            ? rawAnswer
+            : typeof rawAnswer === "object"
+              ? String(
+                  rawAnswer.value ?? rawAnswer.text ?? rawAnswer.url ?? ""
+                )
+              : "";
 
-        let coordinates = parsePointCoordinates(answer);
-        
-        // If it's a short link, we use a free proxy to read it
-        if (!coordinates && (answer.includes("goo.gl") || answer.includes("maps.app"))) {
+        if (!coordinates && isGoogleMapsShortLink(answer)) {
           try {
-            // 🚀 We use a free proxy that bypasses Google's block
-            const proxyUrl = `https://r.jina.ai/http://${answer.replace('https://', '')}`;
-            const res = await fetch(proxyUrl);
-            const text = await res.text();
-            
-            // Look for coordinates in the returned text
-            const match = text.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/) || 
-                          text.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/) ||
-                          text.match(/center=(-?\d+\.\d+)%2C(-?\d+\.\d+)/i);
-            
-            if (match) {
-              coordinates = { lat: parseFloat(match[1]), lng: parseFloat(match[2]) };
+            const response = await fetch(
+              `/api/resolve-link?url=${encodeURIComponent(answer)}`
+            );
+            if (!response.ok) {
+              throw new Error(
+                `Location link resolution failed: ${response.status}`
+              );
             }
-          } catch (err) {
-            console.error("Proxy resolve failed:", err);
+
+            const data: { resolvedUrl?: unknown } = await response.json();
+            if (typeof data.resolvedUrl === "string") {
+              answer = data.resolvedUrl;
+              coordinates = parsePointCoordinates(answer);
+            }
+          } catch (error) {
+            console.error("Could not resolve location link", error);
           }
         }
 
-        // Final fallback: Use database coordinates
-        if (!coordinates && r.geo_lat && r.geo_lng) {
-           coordinates = validCoordinates(r.geo_lat, r.geo_lng);
+        if (!coordinates && r.geo_lat != null && r.geo_lng != null) {
+          coordinates = validCoordinates(r.geo_lat, r.geo_lng);
         }
 
         if (coordinates) {
@@ -581,9 +609,8 @@ function SummaryCard({
             lat: coordinates.lat,
             lng: coordinates.lng,
             label: `Submitted by ${r.submitter_name || "Unknown"}`,
+            responseId: r.id, 
           });
-        } else {
-          console.log("Could not parse coordinates from:", answer);
         }
       }
 
@@ -677,7 +704,10 @@ function SummaryCard({
               Resolving shared locations...
             </div>
           ) : mapPoints.length > 0 ? (
-            <SummaryMap points={mapPoints} />
+            <SummaryMap 
+              points={mapPoints}
+              onViewResponse={onViewResponse}
+            />
           ) : (
             <div className="rounded-lg bg-gray-50 px-3 py-3 text-xs text-gray-500">
               No valid coordinates found in the responses.
@@ -783,6 +813,7 @@ function DataTab({
   onChanged,
   initialFilter,
   openGallery,
+  highlightedResponseId,
 }: {
   project: Project;
   questions: Question[];
@@ -791,6 +822,7 @@ function DataTab({
   onChanged: () => void;
   initialFilter: MediaFilter;
   openGallery: boolean;
+  highlightedResponseId?: string | null;
 }) {
   const [subTab, setSubTab] = useState<DataSubTab>(
     openGallery ? "gallery" : "table"
@@ -803,6 +835,18 @@ function DataTab({
   const [submitterFilter, setSubmitterFilter] = useState<string>("all");
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
+
+  useEffect(() => {
+    if (highlightedResponseId && subTab === "table") {
+      // Small timeout to ensure table is rendered
+      setTimeout(() => {
+        const row = document.getElementById(`response-row-${highlightedResponseId}`);
+        if (row) {
+          row.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }, 100);
+    }
+  }, [highlightedResponseId, subTab]);
 
   const filteredResponses = responses.filter((r) => {
     if (submitterFilter !== "all") {
@@ -1051,7 +1095,13 @@ function DataTab({
                 </thead>
                 <tbody>
                   {filteredResponses.map((r, i) => (
-                    <tr key={r.id} className="border-t border-gray-100">
+                    <tr 
+                      key={r.id} 
+                      id={`response-row-${r.id}`}
+                      className={`border-t border-gray-100 transition-colors duration-500 ${
+                        highlightedResponseId === r.id ? "bg-yellow-100" : ""
+                      }`}
+                    >
                       <td className="px-4 py-3 text-gray-500">{i + 1}</td>
                       <td className="px-4 py-3">
                         <div className="font-medium text-gray-800">

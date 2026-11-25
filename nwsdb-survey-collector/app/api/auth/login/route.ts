@@ -1,3 +1,5 @@
+export const runtime = 'edge';
+
 import { createClient } from "@supabase/supabase-js";
 import type { AuthUser } from "@/lib/auth";
 import {
@@ -65,10 +67,21 @@ export async function POST(request: Request) {
       }
       return Response.json({ error: error.message }, { status: 401 });
     }
-    if (!data || data.is_active === false) {
+    let userData: any = data;
+    if (Array.isArray(userData)) {
+      userData = userData[0]?.login_user ?? userData[0];
+    } else if (
+      userData &&
+      typeof userData === "object" &&
+      "login_user" in userData
+    ) {
+      userData = userData.login_user;
+    }
+
+    if (!userData || userData.is_active === false) {
       return Response.json(
         {
-          error: data
+          error: userData
             ? "Your account has been disabled."
             : "Invalid username or password.",
         },
@@ -77,10 +90,10 @@ export async function POST(request: Request) {
     }
 
     const user: AuthUser = {
-      id: data.id,
-      f_name: data.f_name,
-      email: data.email ?? "",
-      role: data.is_admin ? "admin" : "collector",
+      id: userData.id,
+      f_name: userData.f_name,
+      email: userData.email ?? "",
+      role: userData.is_admin ? "admin" : "collector",
       is_active: true,
     };
     setSessionCookie(createSessionToken(user));

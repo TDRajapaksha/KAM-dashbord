@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
-import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 import * as htmlToImage from "html-to-image";
 
@@ -18,36 +17,49 @@ type MapPoint = {
   lat: number;
   lng: number;
   label: string;
+  responseId?: string; 
 };
 
-function MapBounds({ points }: { points: MapPoint[] }) {
+function MapBounds({ points, isFullScreen }: { points: MapPoint[]; isFullScreen: boolean }) {
   const map = useMap();
 
+  // Fix for gray areas: tell Leaflet to recalculate size when fullscreen changes
   useEffect(() => {
-    if (points.length > 0) {
-      const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lng]));
-      map.fitBounds(bounds, { padding: [50, 50] });
-    }
-  }, [points, map]);
+    setTimeout(() => {
+      map.invalidateSize();
+      if (points.length > 0) {
+        const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lng]));
+        map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+      }
+    }, 100); // slight delay to allow CSS transition to finish
+  }, [points, map, isFullScreen]);
 
   return null;
 }
 
-export default function SummaryMap({ points }: { points: MapPoint[] }) {
+export default function SummaryMap({ 
+  points, 
+  onViewResponse 
+}: { 
+  points: MapPoint[]; 
+  onViewResponse?: (responseId: string) => void;
+}) {
   const [isFullScreen, setIsFullScreen] = useState(false);
   const mapRef = useRef<HTMLDivElement>(null);
 
   const defaultCenter: [number, number] = [6.9271, 79.8612];
 
-  const displayPoints = points.map((p) => {
-    // 🚀 INCREASED JITTER: This spreads the pins out a bit more visually
-    const jitter = 0.0004; 
-    return {
-      ...p,
-      lat: p.lat + (Math.random() - 0.5) * jitter,
-      lng: p.lng + (Math.random() - 0.5) * jitter,
-    };
-  });
+  // Memoize the jittered points so they don't jump around on every render
+  const displayPoints = useMemo(() => {
+    return points.map((p) => {
+      const jitter = 0.0004; 
+      return {
+        ...p,
+        lat: p.lat + (Math.random() - 0.5) * jitter,
+        lng: p.lng + (Math.random() - 0.5) * jitter,
+      };
+    });
+  }, [points]);
 
   const downloadMap = async () => {
     if (!mapRef.current) return;
@@ -81,7 +93,7 @@ export default function SummaryMap({ points }: { points: MapPoint[] }) {
             zoom={12}
             style={{ height: "100%", width: "100%", zIndex: 0 }}
           >
-            <MapBounds points={points} />
+            <MapBounds points={displayPoints} isFullScreen={isFullScreen} />
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -89,16 +101,33 @@ export default function SummaryMap({ points }: { points: MapPoint[] }) {
             {displayPoints.map((point, idx) => (
               <Marker key={idx} position={[point.lat, point.lng]}>
                 <Popup>
-                  <strong>{point.label}</strong>
-                  <br />
-                  <a
-                    href={`https://www.google.com/maps/search/?api=1&query=${point.lat},${point.lng}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-blue-600 hover:underline"
-                  >
-                    Open in Google Maps
-                  </a>
+                  <div className="flex flex-col gap-2 min-w-[160px]">
+                    <strong className="text-sm">{point.label}</strong>
+                    
+                    {/* 🚀 NEW BUTTON: View Response */}
+                    {point.responseId && onViewResponse && (
+                      <button
+                        onClick={() => {
+                          if (point.responseId) {
+                            onViewResponse(point.responseId);
+                            setIsFullScreen(false); // Close fullscreen if open
+                          }
+                        }}
+                        className="inline-block rounded bg-[#004C99] px-3 py-1.5 text-center text-xs font-semibold text-white hover:bg-[#003d7a] transition mb-1"
+                      >
+                        View Response Data
+                      </button>
+                    )}
+
+                    <a
+                      href={`https://www.google.com/maps/search/?api=1&query=${point.lat},${point.lng}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-block rounded bg-gray-50 border border-gray-200 px-3 py-1.5 text-center text-xs font-semibold text-gray-700 hover:bg-gray-100 transition"
+                    >
+                      Open in Google Maps
+                    </a>
+                  </div>
                 </Popup>
               </Marker>
             ))}
@@ -111,7 +140,6 @@ export default function SummaryMap({ points }: { points: MapPoint[] }) {
             {points.length} {points.length === 1 ? "Location" : "Locations"}
           </div>
 
-          {/* Download Button */}
           <button
             onClick={downloadMap}
             className="bg-white p-1.5 rounded-md shadow-md border border-gray-200 text-gray-700 hover:bg-gray-50 transition"
@@ -124,7 +152,6 @@ export default function SummaryMap({ points }: { points: MapPoint[] }) {
             </svg>
           </button>
 
-          {/* Fullscreen Button */}
           <button
             onClick={() => setIsFullScreen(!isFullScreen)}
             className="bg-white p-1.5 rounded-md shadow-md border border-gray-200 text-gray-700 hover:bg-gray-50 transition"

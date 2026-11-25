@@ -14,26 +14,34 @@ type Question = {
   choices: any;
 };
 
+// 🚀 ROBUST COORDINATE PARSER (Matches the one in your Summary Page)
 function parsePointCoordinates(value: string) {
+  if (!value) return null;
+
   let decodedValue = value;
   try {
     decodedValue = decodeURIComponent(value);
   } catch {
-    // Keep the original value when a pasted URL contains malformed escapes.
+    // Keep original if malformed
   }
 
   const coordinatePatterns = [
     /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/,
     /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/i,
-    /(?:Lat(?:itude)?\s*[:=]\s*)?(-?\d+(?:\.\d+)?)\s*,\s*(?:Lng(?:itude)?\s*[:=]\s*)?(-?\d+(?:\.\d+)?)/i,
+    /!2d(-?\d+(?:\.\d+)?)!3d(-?\d+(?:\.\d+)?)/i,
+    /(?:query=|q=|ll=|center=)(-?\d+(?:\.\d+)?)(?:%2C|,)\+?(-?\d+(?:\.\d+)?)/i,
+    /(-?\d+(?:\.\d+)?)\s*,\s*\+?\s*(-?\d+(?:\.\d+)?)/,
   ];
 
   for (const pattern of coordinatePatterns) {
     const match = decodedValue.match(pattern);
     if (!match) continue;
 
-    const lat = Number(match[1]);
-    const lng = Number(match[2]);
+    // Handle reversed match for the !2d!3d pattern
+    const reversed = pattern.source.startsWith("!2d");
+    const lat = Number(reversed ? match[2] : match[1]);
+    const lng = Number(reversed ? match[1] : match[2]);
+
     if (lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
       return { lat, lng };
     }
@@ -130,7 +138,7 @@ export default function FillFormPage() {
       const me = getUser();
       if (!me) throw new Error("You're not logged in.");
 
-            // Extract geo coordinates from any Point answers
+      // Extract geo coordinates from any Point answers
       let geoLat: number | null = null;
       let geoLng: number | null = null;
       const finalAnswers = { ...answers };
@@ -138,19 +146,18 @@ export default function FillFormPage() {
       for (const q of questions) {
         if (q.type === "Point") {
           let v = finalAnswers[q.id]?.toString() ?? "";
+          if (!v) continue;
           
-          // 🚀 If it's a short link, ask the API to expand it
+          // Final safety net: If it's somehow still a short link, resolve it now
           if (v.includes("maps.app.goo.gl") || v.includes("goo.gl")) {
             try {
               const res = await fetch(`/api/resolve-link?url=${encodeURIComponent(v)}`);
               const data = await res.json();
-              
               if (data.resolvedUrl && data.resolvedUrl !== v) {
-                v = data.resolvedUrl; // Use the expanded long link
-                finalAnswers[q.id] = v; 
+                v = data.resolvedUrl; 
               }
             } catch (e) {
-              console.error("Could not expand link", e);
+              console.error("Could not expand link during submission", e);
             }
           }
 
@@ -165,14 +172,13 @@ export default function FillFormPage() {
         }
       }
       
-            const { error: insertErr } = await supabase.from("responses").insert({
+      const { error: insertErr } = await supabase.from("responses").insert({
         project_id: id,
         submitted_by: me.id,
-        answers: finalAnswers, // 🚀 Use the fixed answers here!
+        answers: finalAnswers, 
         geo_lat: geoLat,
         geo_lng: geoLng,
         media: Object.fromEntries(
-          // ... keep the rest the same
           questions
             .filter(
               (question) =>
@@ -399,6 +405,7 @@ function QuestionInput({
     : [];
   const [locating, setLocating] = useState(false);
   const [pointError, setPointError] = useState<string | null>(null);
+  const [resolvingLink, setResolvingLink] = useState(false); // Added state for loading
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
 
@@ -646,28 +653,49 @@ function QuestionInput({
     );
   }
 
-      if (type === "Point") {
+  if (type === "Point") {
     const pointValue = typeof value === "string" ? value : "";
 
-    // 🚀 ADD THIS FUNCTION: Expand the link as soon as it's pasted
+    // 🚀 FULLY FIXED LINK HANDLING
     async function handleLinkChange(e: React.ChangeEvent<HTMLInputElement>) {
       let val = e.target.value.trim();
       
-      // If it's a short link, expand it immediately
+      if (!val) {
+        onChange("");
+        setPointError(null);
+        return;
+      }
+
+      setResolvingLink(true);
+      setPointError(null);
+
+      // 1. If it's a short link, expand it
       if (val.includes("goo.gl") || val.includes("maps.app")) {
         try {
           const res = await fetch(`/api/resolve-link?url=${encodeURIComponent(val)}`);
           const data = await res.json();
           if (data.resolvedUrl) {
-            val = data.resolvedUrl; // Replace with the long link
+            val = data.resolvedUrl; 
           }
         } catch (err) {
           console.error("Could not expand link", err);
         }
       }
+
+      // 2. Extract exact coordinates from the (now long) URL
+      const coords = parsePointCoordinates(val);
       
-      onChange(val);
-      setPointError(null);
+      if (coords) {
+        // 3. OVERWRITE the input field with a perfect query URL so the DB is always clean
+        onChange(`https://www.google.com/maps/search/?api=1&query=${coords.lat},${coords.lng}`);
+        setPointError(null);
+      } else {
+        // Keep the text as typed so the user isn't frustrated by it disappearing, but warn them
+        onChange(val);
+        setPointError("Could not extract coordinates. Please ensure it's a valid Google Maps link.");
+      }
+      
+      setResolvingLink(false);
     }
 
     function useCurrentLocation() {
@@ -706,7 +734,7 @@ function QuestionInput({
           <button
             type="button"
             onClick={useCurrentLocation}
-            disabled={locating}
+            disabled={locating || resolvingLink}
             className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
           >
             {locating ? "Getting location…" : "Use current location"}
@@ -724,12 +752,14 @@ function QuestionInput({
           type="text"
           placeholder="Paste Google Maps share link"
           value={pointValue}
-          onChange={handleLinkChange} // 🚀 USE THE NEW FUNCTION HERE
-          className={inputCls}
+          onChange={handleLinkChange}
+          disabled={resolvingLink}
+          className={`${inputCls} ${resolvingLink ? "bg-gray-50 opacity-50" : ""}`}
         />
         <p className="text-xs text-gray-500">
-          In Google Maps, choose a place, select Share → Copy link, then paste
-          the link above.
+          {resolvingLink 
+            ? "Extracting exact coordinates..." 
+            : "In Google Maps, choose a place, select Share → Copy link, then paste the link above."}
         </p>
         {pointError && <p className="text-xs text-red-600">{pointError}</p>}
       </div>
