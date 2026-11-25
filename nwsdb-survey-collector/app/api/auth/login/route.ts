@@ -87,11 +87,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const user: AuthUser = {
+      const user: AuthUser = {
       id: userData.id,
       f_name: userData.f_name,
       email: userData.email ?? "",
-      role: userData.is_admin ? "admin" : "collector",
+      role: userData.role ?? "collector", // Directly use the role returned by the database
       is_active: true,
     };
     setSessionCookie(createSessionToken(user));
