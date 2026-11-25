@@ -31,8 +31,11 @@ export function createSessionToken(user: AuthUser) {
   return `${payload}.${sign(payload)}`;
 }
 
-export function getSessionUser(): AuthUser | null {
-  const token = cookies().get(COOKIE_NAME)?.value;
+// ✅ NEW: Added async
+export async function getSessionUser(): Promise<AuthUser | null> {
+  const cookieStore = await cookies(); // ✅ NEW: Await cookies()
+  const token = cookieStore.get(COOKIE_NAME)?.value;
+  
   if (!token) return null;
 
   const [payload, signature, extra] = token.split(".");
@@ -61,8 +64,10 @@ export function getSessionUser(): AuthUser | null {
   }
 }
 
-export function setSessionCookie(token: string) {
-  cookies().set(COOKIE_NAME, token, {
+// ✅ NEW: Added async
+export async function setSessionCookie(token: string) {
+  const cookieStore = await cookies(); // ✅ NEW: Await cookies()
+  cookieStore.set(COOKIE_NAME, token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
@@ -71,8 +76,10 @@ export function setSessionCookie(token: string) {
   });
 }
 
-export function clearSessionCookie() {
-  cookies().set(COOKIE_NAME, "", {
+// ✅ NEW: Added async
+export async function clearSessionCookie() {
+  const cookieStore = await cookies(); // ✅ NEW: Await cookies()
+  cookieStore.set(COOKIE_NAME, "", {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",

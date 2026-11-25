@@ -49,7 +49,7 @@ export async function GET(request: Request) {
     return Response.redirect(new URL("/projects?googleSheets=invalid-state", request.url));
   }
 
-  const sessionUser = getSessionUser();
+  const sessionUser = await getSessionUser();
   if (!sessionUser || sessionUser.id !== payload.userId) {
     return Response.redirect(projectSettingsUrl(request, payload.projectId, "session-expired"));
   }

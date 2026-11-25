@@ -7,7 +7,7 @@ import {
 } from "@/lib/google-sheets";
 
 export async function GET(request: Request) {
-  const user = getSessionUser();
+  const user = await getSessionUser();
   if (!user) return Response.json({ error: "Sign in again to continue." }, { status: 401 });
 
   const projectId = new URL(request.url).searchParams.get("projectId") ?? "";
@@ -31,7 +31,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const user = getSessionUser();
+  const user = await getSessionUser();
   if (!user) return Response.json({ error: "Sign in again to continue." }, { status: 401 });
 
   let body: { projectId?: string; spreadsheetUrl?: string };

@@ -18,11 +18,16 @@ function isValidMimeType(questionType: string, mimeType: string) {
   return Boolean(expectedPrefix && mimeType.startsWith(expectedPrefix));
 }
 
+// ✅ NEW (Next.js 15/16)
 export async function POST(
-  request: Request,
-  { params }: { params: { id: string } }
+  request: Request, 
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  const user = getSessionUser();
+  const { id: projectId } = await params; 
+
+  // ✅ FIX 1: Actually get the user from the session
+  const user = await getSessionUser(); 
+
   if (!user) {
     return Response.json({ error: "Not signed in." }, { status: 401 });
   }
@@ -81,7 +86,8 @@ export async function POST(
     const { data: project, error: projectError } = await supabase
       .from("projects")
       .select("id, owner_id, status")
-      .eq("id", params.id)
+      // ✅ FIX 2: Use projectId here, not params.id
+      .eq("id", projectId) 
       .maybeSingle();
 
     if (projectError) throw projectError;

@@ -94,7 +94,7 @@ export async function POST(request: Request) {
       role: userData.role ?? "collector", // Directly use the role returned by the database
       is_active: true,
     };
-    setSessionCookie(createSessionToken(user));
+    await setSessionCookie(createSessionToken(user));
     return Response.json({ user });
   } catch (error) {
     console.error("[auth/login]", error);
