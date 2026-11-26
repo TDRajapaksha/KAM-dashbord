@@ -1,10 +1,12 @@
-import { createClient } from "@supabase/supabase-js";
 import type { AuthUser } from "@/lib/auth";
 import {
   createSessionToken,
   setSessionCookie,
   validateSessionConfiguration,
 } from "@/lib/server-session";
+
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 export async function POST(request: Request) {
   let body: { username?: string; password?: string };
@@ -23,9 +25,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!supabaseUrl || !anonKey) {
+  if (!SUPABASE_URL || !ANON_KEY) {
     return Response.json(
       { error: "Supabase login is not configured on the server." },
       { status: 503 }
@@ -45,16 +45,43 @@ export async function POST(request: Request) {
   }
 
   try {
-    const supabase = createClient(supabaseUrl, anonKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
-    const { data, error } = await supabase.rpc("login_user", {
-      p_username: username,
-      p_password: password,
+    // ── Direct REST call to the login_user RPC (no Supabase JS client) ──
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/login_user`, {
+      method: "POST",
+      headers: {
+        apikey: ANON_KEY,
+        Authorization: `Bearer ${ANON_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        p_username: username,
+        p_password: password,
+      }),
     });
 
-    if (error) {
-      if (/invalid api key/i.test(error.message)) {
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!contentType.includes("application/json")) {
+      // This is what a Cloudflare 1016 page (or any HTML error page) looks like.
+      console.error(
+        "[auth/login] non-JSON response from Supabase",
+        res.status,
+        contentType
+      );
+      return Response.json(
+        {
+          error: `Supabase returned ${res.status} (non-JSON). Check that NEXT_PUBLIC_SUPABASE_URL resolves correctly.`,
+        },
+        { status: 502 }
+      );
+    }
+
+    const payload = await res.json();
+
+    if (!res.ok) {
+      const msg: string =
+        payload?.message ?? payload?.error ?? payload?.hint ?? "Login failed.";
+      if (/invalid api key/i.test(msg)) {
         return Response.json(
           {
             error:
@@ -63,9 +90,11 @@ export async function POST(request: Request) {
           { status: 503 }
         );
       }
-      return Response.json({ error: error.message }, { status: 401 });
+      return Response.json({ error: msg }, { status: 401 });
     }
-    let userData: any = data;
+
+    // ── Normalise the RPC return shape ──
+    let userData: any = payload;
     if (Array.isArray(userData)) {
       userData = userData[0]?.login_user ?? userData[0];
     } else if (
@@ -87,13 +116,14 @@ export async function POST(request: Request) {
       );
     }
 
-      const user: AuthUser = {
+    const user: AuthUser = {
       id: userData.id,
       f_name: userData.f_name,
       email: userData.email ?? "",
-      role: userData.role ?? "collector", // Directly use the role returned by the database
+      role: userData.role ?? "collector",
       is_active: true,
     };
+
     await setSessionCookie(createSessionToken(user));
     return Response.json({ user });
   } catch (error) {

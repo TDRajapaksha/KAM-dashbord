@@ -1,7 +1,5 @@
 "use client";
 
-import { supabase } from "./supabase";
-
 export type AuthUser = {
   id: string;
   f_name: string;
@@ -11,6 +9,9 @@ export type AuthUser = {
 };
 
 const STORAGE_KEY = "dbtool-admin-user";
+
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
 // ═══════════════════════════════════════════════════════════
 // SESSION
@@ -43,6 +44,8 @@ export function isAdmin(user: AuthUser | null): boolean {
 
 // ═══════════════════════════════════════════════════════════
 // LOGIN — creates an HttpOnly server session after password verification.
+// The actual Supabase call happens in /api/auth/login (server-side),
+// which uses fetch against the REST API — no Supabase client library.
 // ═══════════════════════════════════════════════════════════
 
 export async function login(
@@ -53,11 +56,26 @@ export async function login(
     return { ok: false, error: "Enter a username and password." };
   }
 
-  const response = await fetch("/api/auth/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: username.trim(), password }),
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: username.trim(), password }),
+    });
+  } catch {
+    return { ok: false, error: "Network error — could not reach the server." };
+  }
+
+  // Guard against non-JSON bodies (e.g. a Cloudflare 1016 HTML error page).
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    return {
+      ok: false,
+      error: `Server returned ${response.status} (non-JSON). Check that the Supabase URL resolves.`,
+    };
+  }
+
   const result = await response.json();
   if (!response.ok) return { ok: false, error: result.error ?? "Login failed." };
 
@@ -67,7 +85,8 @@ export async function login(
 }
 
 // ═══════════════════════════════════════════════════════════
-// REGISTER — calls the register_user RPC (bcrypt hash server-side)
+// REGISTER — calls the register_user RPC directly over REST
+// (bypasses the Supabase JS client to avoid Worker DNS issues)
 // ═══════════════════════════════════════════════════════════
 
 export async function register({
@@ -91,30 +110,45 @@ export async function register({
   }
 
   try {
-    const { data, error } = await supabase.rpc("register_user", {
-      p_f_name: fName.trim(),
-      p_email: email.trim().toLowerCase(),
-      p_password: password,
-      p_phone: phone?.trim() ?? "",
-      p_l_name: lName?.trim() ?? "",
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/register_user`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        p_f_name: fName.trim(),
+        p_email: email.trim().toLowerCase(),
+        p_password: password,
+        p_phone: phone?.trim() ?? "",
+        p_l_name: lName?.trim() ?? "",
+      }),
     });
 
-    if (error) {
-      return { ok: false, error: error.message };
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!contentType.includes("application/json")) {
+      return {
+        ok: false,
+        error: `Server returned ${res.status} (non-JSON). Check that the Supabase URL resolves.`,
+      };
     }
 
+    const data = await res.json();
+    if (!res.ok) {
+      return { ok: false, error: data?.message ?? data?.error ?? "Registration failed." };
+    }
+
+    // Normalise the various shapes the RPC might return.
     let row: any = data;
     if (Array.isArray(row)) {
       row = row[0]?.register_user ?? row[0];
-    } else if (
-      row &&
-      typeof row === "object" &&
-      "register_user" in row
-    ) {
+    } else if (row && typeof row === "object" && "register_user" in row) {
       row = row.register_user;
     }
-    if (!row?.success) {
-      return { ok: false, error: row?.error ?? "Registration failed." };
+    if (row && row.success === false) {
+      return { ok: false, error: row.error ?? "Registration failed." };
     }
 
     return { ok: true };
@@ -133,7 +167,6 @@ export function logout() {
   }
   clearUser();
   if (typeof window !== "undefined") {
-    // Hard reload forces a fresh fetch of the login page — no cached state
     window.location.href = "/login";
   }
 }
